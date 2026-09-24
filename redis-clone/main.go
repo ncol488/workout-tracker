@@ -6,6 +6,15 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"sync"
+)
+
+// store is our in-memory key-value data, shared across ALL client connections.
+// Because multiple goroutines (one per client) can read/write it at the same
+// time, we guard every access with mu.
+var (
+	store = make(map[string]string)
+	mu    sync.Mutex
 )
 
 func main() {
@@ -40,34 +49,73 @@ func handleConnection(conn net.Conn) {
 			return
 		}
 
-		fmt.Println("Parsed command:", args)
-
 		if len(args) == 0 {
 			continue
 		}
 
-		switch args[0] {
-		case "PING":
-			// RESP simple string reply: '+' + text + \r\n
-			conn.Write([]byte("+PONG\r\n"))
-		default:
-			// We don't know this command yet — send a RESP error reply.
-			conn.Write([]byte("-ERR unknown command\r\n"))
+		reply := handleCommand(args)
+		conn.Write([]byte(reply))
+	}
+}
+
+// handleCommand runs the given command against the store and returns
+// a fully RESP-formatted reply string, ready to write straight to the client.
+func handleCommand(args []string) string {
+	switch args[0] {
+	case "PING":
+		return "+PONG\r\n"
+
+	case "SET":
+		if len(args) != 3 {
+			return "-ERR wrong number of arguments for 'SET'\r\n"
 		}
+		mu.Lock()
+		store[args[1]] = args[2]
+		mu.Unlock()
+		return "+OK\r\n"
+
+	case "GET":
+		if len(args) != 2 {
+			return "-ERR wrong number of arguments for 'GET'\r\n"
+		}
+		mu.Lock()
+		val, ok := store[args[1]]
+		mu.Unlock()
+
+		if !ok {
+			// RESP's "nil" bulk string reply — how Redis says "no such key"
+			return "$-1\r\n"
+		}
+		// A real bulk string reply: $<length>\r\n<data>\r\n
+		return fmt.Sprintf("$%d\r\n%s\r\n", len(val), val)
+
+	case "DEL":
+		if len(args) != 2 {
+			return "-ERR wrong number of arguments for 'DEL'\r\n"
+		}
+		mu.Lock()
+		_, existed := store[args[1]]
+		delete(store, args[1])
+		mu.Unlock()
+
+		if existed {
+			return ":1\r\n" // RESP integer reply: 1 key deleted
+		}
+		return ":0\r\n" // 0 keys deleted (it didn't exist)
+
+	default:
+		return "-ERR unknown command\r\n"
 	}
 }
 
 // readCommand reads one full RESP command: an array header, followed by
 // that many bulk strings, and returns them as a slice of strings.
-// Example wire input:  *3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n
-// Returns:              []string{"SET", "foo", "bar"}
 func readCommand(reader *bufio.Reader) ([]string, error) {
-	// --- Read the array header line, e.g. "*3" ---
 	line, err := reader.ReadString('\n')
 	if err != nil {
 		return nil, err
 	}
-	line = line[:len(line)-2] // strip trailing \r\n
+	line = line[:len(line)-2]
 
 	if len(line) == 0 || line[0] != '*' {
 		return nil, fmt.Errorf("expected array, got: %q", line)
@@ -78,12 +126,8 @@ func readCommand(reader *bufio.Reader) ([]string, error) {
 		return nil, fmt.Errorf("bad array count: %q", line)
 	}
 
-	// --- Read `count` bulk strings, one at a time ---
 	args := make([]string, 0, count)
 	for i := 0; i < count; i++ {
-		// Each bulk string is TWO lines: a "$N" length header, then the
-		// actual N bytes of data (also followed by \r\n).
-
 		lengthLine, err := reader.ReadString('\n')
 		if err != nil {
 			return nil, err
