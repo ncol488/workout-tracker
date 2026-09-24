@@ -41,6 +41,19 @@ func handleConnection(conn net.Conn) {
 		}
 
 		fmt.Println("Parsed command:", args)
+
+		if len(args) == 0 {
+			continue
+		}
+
+		switch args[0] {
+		case "PING":
+			// RESP simple string reply: '+' + text + \r\n
+			conn.Write([]byte("+PONG\r\n"))
+		default:
+			// We don't know this command yet — send a RESP error reply.
+			conn.Write([]byte("-ERR unknown command\r\n"))
+		}
 	}
 }
 
