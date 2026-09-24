@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"net"
 	"os"
@@ -24,4 +25,23 @@ func main() {
 	defer conn.Close()
 
 	fmt.Println("Client connected:", conn.RemoteAddr())
+
+	// Read lines from the client and write them straight back.
+	reader := bufio.NewReader(conn)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			// Client disconnected, or something went wrong reading.
+			fmt.Println("Connection closed:", err)
+			return
+		}
+
+		fmt.Print("Received: ", line)
+
+		_, err = conn.Write([]byte(line))
+		if err != nil {
+			fmt.Println("Failed to write back to client:", err)
+			return
+		}
+	}
 }
